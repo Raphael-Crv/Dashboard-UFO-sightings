@@ -1,0 +1,432 @@
+---
+title: "UFO sightings"
+author: "Raphael and David"
+format: dashboard
+server: shiny
+---
+```{python}
+#| context: setup
+import seaborn as sns
+import pandas as pd
+import matplotlib.pyplot as plt
+from shiny import reactive
+from shiny.express import render, ui
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from scipy.cluster.hierarchy import linkage, dendrogram
+from sklearn.cluster import AgglomerativeClustering
+
+# Load data
+df = pd.read_csv("G05_ufo6.csv")
+```
+
+# Total UFO sightings in USA {.sidebar-section}
+
+## Sidebar {.sidebar}
+
+### Select minimal density by city 
+```{python}
+ui.input_slider(
+    "density_value",
+    "Choose a UFO sighting density :",
+    min=0,
+    max=200,     # Max 200 because it allows to never return an empty table with the filter
+    value=0,     # defaut value
+    step=1     
+)
+
+#filters the dataset to include only UFO sightings that occurred in the United States
+us_df = df[df['country'] == 'us'].copy()
+
+#standardizes city names by converting them to lowercase and removing any leading or trailing whitespace
+us_df['city'] = us_df['city'].str.lower().str.strip()
+
+@reactive.calc
+def filtered_city_counts():
+    min_density = input.density_value()  # value of the slider
+    city_counts = (
+        us_df.groupby("city")
+        .size()
+        .reset_index(name="sightings")
+    )
+
+    # Filtered according to selected density
+    city_counts_filtered = city_counts[city_counts["sightings"] >= min_density]
+
+    return city_counts_filtered
+
+# Compute and store hierarchical clustering data :
+@reactive.calc
+def city_hierarchical_clusters():
+    # Use only US sightings
+    us_data = df[df["country"] == "us"].copy()
+
+    # Normalize city names
+    us_data["city"] = us_data["city"].str.lower().str.strip()
+
+    # Ensure latitude/longitude are numeric
+    us_data["latitude"] = pd.to_numeric(us_data["latitude"], errors="coerce")
+    us_data["longitude"] = pd.to_numeric(us_data["longitude"], errors="coerce")
+    us_data = us_data.dropna(subset=["latitude", "longitude"])
+
+    # Group by city and compute mean coordinates
+    city_coords = (
+        us_data.groupby("city")[["latitude", "longitude"]]
+        .mean()
+        .reset_index()
+    )
+
+    # Standardize data before clustering
+    scaler = StandardScaler()
+    coords_scaled = scaler.fit_transform(city_coords[["latitude", "longitude"]])
+
+    # Compute hierarchical clustering linkage matrix (used for dendrogram)
+    Z = linkage(coords_scaled, method="ward", metric="euclidean")
+
+    # Perform actual clustering into 4 clusters (can be justify by the following dendogram)
+    model = AgglomerativeClustering(n_clusters=4, metric='euclidean', linkage='ward')
+    city_coords["hcluster"] = model.fit_predict(coords_scaled)
+
+    # Return both city data and linkage matrix
+    return city_coords, Z
+
+
+```
+
+## Content {.tabset}
+
+### US map by density of UFO sightings by city
+
+```{python}
+@render.plot
+def ufo_map():
+    # Convert coordinates to numeric to allow averaging
+    us_df["latitude"] = pd.to_numeric(us_df["latitude"], errors="coerce")
+    us_df["longitude"] = pd.to_numeric(us_df["longitude"], errors="coerce")
+
+    # Get the current filtered data (cities with sightings ≥ selected density)
+    data = filtered_city_counts()
+
+    # Compute average coordinates per city
+    coords = (
+        us_df.groupby("city")[["latitude", "longitude"]]
+        .mean()
+        .reset_index()
+    )
+
+    # Merge coordinates with sightings count
+    merged = pd.merge(data, coords, on="city", how="left")
+    merged = merged.dropna(subset=["latitude", "longitude"])
+
+    # Plot the cities on a fixed-scale USA map
+    plt.figure(figsize=(10, 6))
+    plt.title("UFO Sightings per US City (Filtered by Minimum Density)", fontsize=14)
+    plt.xlabel("Longitude", fontsize=12)
+    plt.ylabel("Latitude", fontsize=12)
+    plt.xlim(-125, -65)  # Fixed longitude range for the US
+    plt.ylim(25, 50)     # Fixed latitude range for the US
+
+    # Scatter plot with size and color representing number of sightings
+    scatter = plt.scatter(
+        merged["longitude"],
+        merged["latitude"],
+        s=merged["sightings"] * 2,
+        c=merged["sightings"],
+        cmap="Reds",
+        alpha=0.7,
+        edgecolor="black"
+    )
+
+    plt.colorbar(scatter, label="Number of Sightings")
+    plt.grid(True, linestyle="--", alpha=0.5)
+    plt.tight_layout()
+```
+
+### Cities by density of UFO sightings
+
+```{python}
+@render.data_frame
+def ufo_city_table():
+#Display only the cities with density of UFO sightings >= selected minimal density
+    data = filtered_city_counts()
+    sorted_data = data.sort_values(by="sightings", ascending=True)
+    return sorted_data.reset_index(drop=True)
+```
+
+### Clustering of UFO sightings by U.S. city
+
+```{python}
+@render.plot
+def hierarchical_cluster_city_map():
+    city_data, _ = city_hierarchical_clusters()
+
+    plt.figure(figsize=(10, 6))
+    plt.title("Hierarchical Clustering of U.S. Cities by UFO Sightings", fontsize=14)
+    plt.xlabel("Longitude")
+    plt.ylabel("Latitude")
+
+    scatter = plt.scatter(
+        city_data["longitude"],
+        city_data["latitude"],
+        c=city_data["hcluster"],
+        cmap="Set1",
+        s=60,
+        alpha=0.8,
+        edgecolor="black"
+    )
+
+    plt.grid(True, linestyle="--", alpha=0.5)
+    plt.xlim(-125, -65)
+    plt.ylim(25, 50)
+    plt.tight_layout()
+```
+```{python}
+# Shows the dendogram that justify that 4 clusters is the more logical: By cuting at a height before a big vertical leap this dendogram, we cross 4 vertical lines
+@render.plot
+def dendrogram_plot():
+    city_data, Z = city_hierarchical_clusters()
+
+    plt.figure(figsize=(12, 5))
+    plt.title("Dendrogram of U.S. Cities by Mean UFO Coordinates", fontsize=14)
+    dendrogram(Z, no_labels=True, color_threshold=None)
+    plt.xlabel("Cities")
+    plt.ylabel("Distance")
+    plt.tight_layout()
+
+```
+
+
+
+# UFO sightings per year in the world
+
+## Sidebar {.sidebar}
+
+### Select the year for which you want to see the data
+```{python}
+# Convert the 'datetime' column to datetime format
+df['datetime'] = pd.to_datetime(df['datetime'], errors='coerce')
+
+# Extract the year from the 'datetime' column
+df['year'] = df['datetime'].dt.year
+
+# Year selection slider
+ui.input_slider(
+    "year",
+    "Choose the year :",
+    min=int(df['year'].min())+80,   # Minimum year from the dataset + 80 to have only years with significative data
+    max=int(df['year'].max()),   # Maximum year from the dataset
+    value=int(df['year'].min())+80, 
+    step=1,                                          
+)
+
+
+df['city'] = df['city'].str.lower().str.strip()
+# Extracts the year from the datetime column and stores it in a new year column for filtering and plotting
+df['year'] = df['datetime'].dt.year 
+
+# Reactive calculation based on selected year
+@reactive.calc
+def filtered_year_city_counts():
+    selected_year = input.year()  # Get year from slider input
+
+    # Filter dataset to only include rows from the selected year
+    df_year = df[df['year'] == selected_year]
+
+    # Count number of sightings per city
+    city_counts = (
+        df_year.groupby("city")
+        .size()
+        .reset_index(name="sightings")
+    )
+
+    return city_counts  # Return the filtered city count DataFrame
+
+```
+
+### Select the number of clusters
+```{python}
+ui.input_slider(
+    "num_clusters",
+    "Choose a number :",
+    min=1,
+    max=10,
+    value=1,
+    step=1
+)
+
+@reactive.calc
+def clustered_sightings():
+    selected_year = input.year()
+    k = input.num_clusters()
+
+    # Filter data for the selected year and drop missing coords
+    data = df[df["year"] == selected_year].copy()
+    data = data.dropna(subset=["latitude", "longitude"])
+
+    if len(data) == 0:
+        return pd.DataFrame(columns=["latitude", "longitude", "cluster"])
+
+    # Prepare coordinates for clustering
+    coords = data[["latitude", "longitude"]]
+
+    # Standardize coordinates for better clustering performance
+    scaler = StandardScaler()
+    coords_scaled = scaler.fit_transform(coords)
+
+    # Run KMeans clustering
+    kmeans = KMeans(n_clusters=k, random_state=42)
+    clusters = kmeans.fit_predict(coords_scaled)
+
+    # Attach cluster labels to the data
+    data["cluster"] = clusters
+
+    return data
+
+# Reactive calculation of inertia values for choosing optimaly the number of clusters with the elbow on the curve
+@reactive.calc
+def inertia_curve_data():
+    selected_year = input.year()
+
+    # Filter the data for the selected year and drop rows with missing coordinates
+    data = df[df["year"] == selected_year].copy()
+    data = data.dropna(subset=["latitude", "longitude"])
+
+    # Extract and scale coordinates
+    coords = data[["latitude", "longitude"]]
+    scaler = StandardScaler()
+    coords_scaled = scaler.fit_transform(coords)
+
+    # Compute inertia for cluster counts from 1 to 10
+    inertias = []
+    for k in range(1, 11):
+        kmeans = KMeans(n_clusters=k, random_state=42)
+        kmeans.fit(coords_scaled)
+        inertias.append({"k": k, "inertia": kmeans.inertia_})
+
+    # Return results as a DataFrame
+    return pd.DataFrame(inertias)
+
+
+
+```
+  
+## Content {.tabset}
+
+### Cities with most UFO sigthings this year
+```{python}
+@render.plot
+def top_cities_bar_chart():
+    # Get filtered data for the selected year
+    data = filtered_year_city_counts()
+
+    # Sort by number of sightings and take the top 7
+    top_cities = data.sort_values(by="sightings", ascending=False).head(7)
+
+    # Create the bar plot
+    plt.figure(figsize=(10, 6))
+    plt.barh(top_cities["city"], top_cities["sightings"], color="royalblue", edgecolor="black")
+    plt.xlabel("Number of Sightings")
+    plt.title(f"Top 7 Cities by UFO Sightings in {input.year()}")
+    plt.gca().invert_yaxis()  # Highest values at the top
+    plt.grid(axis='x', linestyle='--', alpha=0.7)
+    plt.tight_layout()
+```
+
+### Map of UFO sightings per year
+```{python}
+@render.plot
+def yearly_ufo_world_map():
+    # Ensure coordinates are numeric
+    df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
+    df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
+
+    # Filter the dataset for the selected year
+    selected_year = input.year()
+    year_df = df[df["year"] == selected_year].copy()
+
+    # Drop rows with missing or invalid coordinates
+    year_df = year_df.dropna(subset=["latitude", "longitude"])
+
+    # Plot the individual sightings
+    plt.figure(figsize=(12, 6))
+    plt.title(f"UFO Sightings Worldwide in {selected_year}", fontsize=14)
+    plt.xlabel("Longitude", fontsize=12)
+    plt.ylabel("Latitude", fontsize=12)
+    plt.xlim(-180, 180)
+    plt.ylim(-90, 90)
+
+    # Each point represents a single sighting
+    scatter = plt.scatter(
+        year_df["longitude"],
+        year_df["latitude"],
+        s=10,  # fixed size since each point is one sighting
+        c="purple",
+        alpha=0.5,
+        edgecolor="black"
+    )
+
+    plt.grid(True, linestyle="--", alpha=0.5)
+    plt.tight_layout()
+```
+  
+### Clusters of UFO sightings per year
+```{python}
+@render.plot
+def clustered_ufo_map():
+    
+    #The following phaseshould not be needed but allows debugging the code, in fact without that debugging lines the plot wasn't well
+    plt.close('all')  # Clear previous plots
+
+    # Get clustered data (including cluster labels)
+    data = clustered_sightings().copy()
+
+    # Drop invalid latitude/longitude values 
+    data["latitude"] = pd.to_numeric(data["latitude"], errors="coerce")
+    data["longitude"] = pd.to_numeric(data["longitude"], errors="coerce")
+    data = data.dropna(subset=["latitude", "longitude"])
+    # End of debugging
+
+    # Create the plot
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.set_title(f"K-means UFO Sightings Clustering in {input.year()} with {input.num_clusters()} Clusters", fontsize=14)
+    ax.set_xlabel("Longitude", fontsize=12)
+    ax.set_ylabel("Latitude", fontsize=12)
+
+    # Adjust the view to match actual data range
+    ax.set_xlim(data["longitude"].min() - 1, data["longitude"].max() + 1)
+    ax.set_ylim(data["latitude"].min() - 1, data["latitude"].max() + 1)
+
+    scatter = ax.scatter(
+        data["longitude"],
+        data["latitude"],
+        c=data["cluster"],
+        cmap="tab20",
+        s=30,
+        alpha=0.7,
+        edgecolors="black",
+        linewidths=0.3
+    )
+
+    ax.grid(True, linestyle="--", alpha=0.5)
+    plt.tight_layout()
+
+```
+
+
+```{python}
+# Render the elbow curve showing inertia vs. number of clusters
+@render.plot
+def inertia_plot():
+    # Get the inertia values from the reactive function
+    df_inertia = inertia_curve_data()
+
+    # Create the inertia line plot
+    plt.figure(figsize=(8, 5))
+    plt.plot(df_inertia["k"], df_inertia["inertia"], marker="o")
+    plt.title("Elbow Method for Optimal k (Inertia vs. Number of Clusters)")
+    plt.xlabel("Number of Clusters (k)")
+    plt.ylabel("Inertia")
+    plt.xticks(range(1, 11))
+    plt.grid(True, linestyle="--", alpha=0.5)
+    plt.tight_layout()
+```
